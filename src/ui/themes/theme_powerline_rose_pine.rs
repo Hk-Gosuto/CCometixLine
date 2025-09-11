@@ -216,3 +216,32 @@ pub fn output_style_segment() -> SegmentConfig {
         options: HashMap::new(),
     }
 }
+pub fn quota_segment() -> SegmentConfig {
+    SegmentConfig {
+        id: SegmentId::Quota,
+        enabled: true,
+        icon: IconConfig {
+            plain: "📊".to_string(),
+            nerd_font: "\u{f0e4e}".to_string(),
+        },
+        colors: ColorConfig {
+            icon: Some(AnsiColor::Rgb {
+                r: 235,
+                g: 188,
+                b: 186,
+            }),
+            text: Some(AnsiColor::Rgb {
+                r: 235,
+                g: 188,
+                b: 186,
+            }),
+            background: Some(AnsiColor::Rgb {
+                r: 235,
+                g: 111,
+                b: 146,
+            }), // Rose Pine love background
+        },
+        styles: TextStyleConfig::default(),
+        options: HashMap::new(),
+    }
+}

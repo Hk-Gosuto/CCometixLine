@@ -1,36 +1,37 @@
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
 // Silent mode detection
-const silent = process.env.npm_config_loglevel === 'silent' || 
-               process.env.CCLINE_SKIP_POSTINSTALL === '1';
+const silent =
+  process.env.npm_config_loglevel === "silent" ||
+  process.env.CCLINE_SKIP_POSTINSTALL === "1";
 
 if (!silent) {
-  console.log('🚀 Setting up CCometixLine for Claude Code...');
+  console.log("🚀 Setting up CCometixLine for Claude Code...");
 }
 
 try {
   const platform = process.platform;
   const arch = process.arch;
   const homeDir = os.homedir();
-  const claudeDir = path.join(homeDir, '.claude', 'ccline');
+  const claudeDir = path.join(homeDir, ".claude", "ccline");
 
   // Create directory
   fs.mkdirSync(claudeDir, { recursive: true });
 
   // Determine platform key
   let platformKey = `${platform}-${arch}`;
-  if (platform === 'linux') {
+  if (platform === "linux") {
     // Detect if static linking is needed based on glibc version
     function shouldUseStaticBinary() {
       try {
-        const { execSync } = require('child_process');
-        const lddOutput = execSync('ldd --version 2>/dev/null || echo ""', { 
-          encoding: 'utf8',
-          timeout: 1000 
+        const { execSync } = require("child_process");
+        const lddOutput = execSync('ldd --version 2>/dev/null || echo ""', {
+          encoding: "utf8",
+          timeout: 1000,
         });
-        
+
         // Parse "ldd (GNU libc) 2.35" format
         const match = lddOutput.match(/(?:GNU libc|GLIBC).*?(\d+)\.(\d+)/);
         if (match) {
@@ -43,22 +44,22 @@ try {
         // If detection fails, default to dynamic binary
         return false;
       }
-      
+
       return false;
     }
-    
+
     if (shouldUseStaticBinary()) {
-      platformKey = 'linux-x64-musl';
+      platformKey = "linux-x64-musl";
     }
   }
 
   const packageMap = {
-    'darwin-x64': '@cometix/ccline-darwin-x64',
-    'darwin-arm64': '@cometix/ccline-darwin-arm64',
-    'linux-x64': '@cometix/ccline-linux-x64',
-    'linux-x64-musl': '@cometix/ccline-linux-x64-musl',
-    'win32-x64': '@cometix/ccline-win32-x64',
-    'win32-ia32': '@cometix/ccline-win32-x64', // Use 64-bit for 32-bit
+    "darwin-x64": "@gosuto/ccline-darwin-x64",
+    "darwin-arm64": "@gosuto/ccline-darwin-arm64",
+    "linux-x64": "@gosuto/ccline-linux-x64",
+    "linux-x64-musl": "@gosuto/ccline-linux-x64-musl",
+    "win32-x64": "@gosuto/ccline-win32-x64",
+    "win32-ia32": "@gosuto/ccline-win32-x64", // Use 64-bit for 32-bit
   };
 
   const packageName = packageMap[platformKey];
@@ -69,18 +70,18 @@ try {
     process.exit(0);
   }
 
-  const binaryName = platform === 'win32' ? 'ccline.exe' : 'ccline';
+  const binaryName = platform === "win32" ? "ccline.exe" : "ccline";
   const targetPath = path.join(claudeDir, binaryName);
 
   // Multiple path search strategies for different package managers
   const findBinaryPath = () => {
     const possiblePaths = [
       // npm/yarn: nested in node_modules
-      path.join(__dirname, '..', 'node_modules', packageName, binaryName),
+      path.join(__dirname, "..", "node_modules", packageName, binaryName),
       // pnpm: try require.resolve first
       (() => {
         try {
-          const packagePath = require.resolve(packageName + '/package.json');
+          const packagePath = require.resolve(packageName + "/package.json");
           return path.join(path.dirname(packagePath), binaryName);
         } catch {
           return null;
@@ -92,24 +93,34 @@ try {
         const pnpmMatch = currentPath.match(/(.+\.pnpm)[\\/]([^\\//]+)[\\/]/);
         if (pnpmMatch) {
           const pnpmRoot = pnpmMatch[1];
-          const packageNameEncoded = packageName.replace('/', '+');
-          
+          const packageNameEncoded = packageName.replace("/", "+");
+
           try {
             // Try to find any version of the package
             const pnpmContents = fs.readdirSync(pnpmRoot);
-            const packagePattern = new RegExp(`^${packageNameEncoded.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}@`);
-            const matchingPackage = pnpmContents.find(dir => packagePattern.test(dir));
-            
+            const packagePattern = new RegExp(
+              `^${packageNameEncoded.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}@`
+            );
+            const matchingPackage = pnpmContents.find((dir) =>
+              packagePattern.test(dir)
+            );
+
             if (matchingPackage) {
-              return path.join(pnpmRoot, matchingPackage, 'node_modules', packageName, binaryName);
+              return path.join(
+                pnpmRoot,
+                matchingPackage,
+                "node_modules",
+                packageName,
+                binaryName
+              );
             }
           } catch {
             // Fallback to current behavior if directory reading fails
           }
         }
         return null;
-      })()
-    ].filter(p => p !== null);
+      })(),
+    ].filter((p) => p !== null);
 
     for (const testPath of possiblePaths) {
       if (fs.existsSync(testPath)) {
@@ -122,14 +133,14 @@ try {
   const sourcePath = findBinaryPath();
   if (!sourcePath) {
     if (!silent) {
-      console.log('Binary package not installed, skipping Claude Code setup');
-      console.log('The global ccline command will still work via npm');
+      console.log("Binary package not installed, skipping Claude Code setup");
+      console.log("The global ccline command will still work via npm");
     }
     process.exit(0);
   }
 
   // Copy or link the binary
-  if (platform === 'win32') {
+  if (platform === "win32") {
     // Windows: Copy file
     fs.copyFileSync(sourcePath, targetPath);
   } else {
@@ -142,19 +153,19 @@ try {
     } catch {
       fs.copyFileSync(sourcePath, targetPath);
     }
-    fs.chmodSync(targetPath, '755');
+    fs.chmodSync(targetPath, "755");
   }
 
   if (!silent) {
-    console.log('✨ CCometixLine is ready for Claude Code!');
+    console.log("✨ CCometixLine is ready for Claude Code!");
     console.log(`📍 Location: ${targetPath}`);
-    console.log('🎉 You can now use: ccline --help');
+    console.log("🎉 You can now use: ccline --help");
   }
 } catch (error) {
   // Silent failure - don't break installation
   if (!silent) {
-    console.log('Note: Could not auto-configure for Claude Code');
-    console.log('The global ccline command will still work.');
-    console.log('You can manually copy ccline to ~/.claude/ccline/ if needed');
+    console.log("Note: Could not auto-configure for Claude Code");
+    console.log("The global ccline command will still work.");
+    console.log("You can manually copy ccline to ~/.claude/ccline/ if needed");
   }
 }

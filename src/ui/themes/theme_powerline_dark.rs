@@ -216,3 +216,33 @@ pub fn output_style_segment() -> SegmentConfig {
         options: HashMap::new(),
     }
 }
+
+pub fn quota_segment() -> SegmentConfig {
+    SegmentConfig {
+        id: SegmentId::Quota,
+        enabled: true,
+        icon: IconConfig {
+            plain: "📊".to_string(),
+            nerd_font: "\u{f0e4e}".to_string(),
+        },
+        colors: ColorConfig {
+            icon: Some(AnsiColor::Rgb {
+                r: 224,
+                g: 108,
+                b: 117,
+            }),
+            text: Some(AnsiColor::Rgb {
+                r: 224,
+                g: 108,
+                b: 117,
+            }),
+            background: Some(AnsiColor::Rgb {
+                r: 40,
+                g: 44,
+                b: 52,
+            }), // Powerline dark red background
+        },
+        styles: TextStyleConfig::default(),
+        options: HashMap::new(),
+    }
+}

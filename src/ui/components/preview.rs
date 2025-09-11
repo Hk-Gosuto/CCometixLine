@@ -178,6 +178,18 @@ impl PreviewComponent {
                         map
                     },
                 },
+                SegmentId::Quota => SegmentData {
+                    primary: "Premium: 298 (99%)".to_string(),
+                    secondary: "".to_string(),
+                    metadata: {
+                        let mut map = HashMap::new();
+                        map.insert("premium_remaining".to_string(), "298".to_string());
+                        map.insert("premium_percent".to_string(), "99.33".to_string());
+                        map.insert("premium_unlimited".to_string(), "false".to_string());
+                        map.insert("plan".to_string(), "business".to_string());
+                        map
+                    },
+                },
             };
 
             segments_data.push((segment_config.clone(), mock_data));
