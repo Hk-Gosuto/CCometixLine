@@ -122,12 +122,10 @@ impl QuotaSegment {
                 } else {
                     format!("{:.1}k ({:.1}%)", k_value, percent)
                 }
+            } else if percent.fract() == 0.0 {
+                format!("{} ({:.0}%)", remaining, percent)
             } else {
-                if percent.fract() == 0.0 {
-                    format!("{} ({:.0}%)", remaining, percent)
-                } else {
-                    format!("{} ({:.1}%)", remaining, percent)
-                }
+                format!("{} ({:.1}%)", remaining, percent)
             }
         }
     }
@@ -138,10 +136,7 @@ impl Segment for QuotaSegment {
         #[cfg(feature = "quota")]
         {
             // Check if we can get the base URL from settings
-            if Self::get_anthropic_base_url().is_none() {
-                // No base URL configured, don't show quota segment
-                return None;
-            }
+            Self::get_anthropic_base_url()?;
 
             let quota_data = Self::fetch_quota_data()?;
 
