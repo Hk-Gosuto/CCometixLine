@@ -215,7 +215,11 @@ impl StatusLineGenerator {
     }
 
     fn render_segment(&self, config: &SegmentConfig, data: &SegmentData) -> String {
-        let icon = self.get_icon(config);
+        let icon = if let Some(dynamic_icon) = data.metadata.get("dynamic_icon") {
+            dynamic_icon.clone()
+        } else {
+            self.get_icon(config)
+        };
 
         // Apply background color to the entire segment if set
         if let Some(bg_color) = &config.colors.background {
@@ -475,6 +479,10 @@ pub fn collect_all_segments(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let segment = GitSegment::new().with_sha(show_sha);
+                segment.collect(input)
+            }
+            crate::config::SegmentId::ContextWindow => {
+                let segment = ContextWindowSegment::new();
                 segment.collect(input)
             }
             crate::config::SegmentId::Usage => {

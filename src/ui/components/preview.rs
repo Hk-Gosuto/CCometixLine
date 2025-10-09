@@ -125,7 +125,7 @@ impl PreviewComponent {
                         map
                     },
                 },
-                SegmentId::Usage => SegmentData {
+                SegmentId::ContextWindow => SegmentData {
                     primary: "78.2%".to_string(),
                     secondary: "· 156.4k".to_string(),
                     metadata: {
@@ -135,6 +135,11 @@ impl PreviewComponent {
                         map.insert("session_tokens".to_string(), "48200".to_string());
                         map
                     },
+                },
+                SegmentId::Usage => SegmentData {
+                    primary: "24%".to_string(),
+                    secondary: "· 10-7-2".to_string(),
+                    metadata: HashMap::new(),
                 },
                 SegmentId::Cost => SegmentData {
                     primary: "$0.02".to_string(),

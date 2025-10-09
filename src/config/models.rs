@@ -134,29 +134,34 @@ impl Default for ModelConfig {
                 // 1M context models (put first for priority matching)
                 ModelEntry {
                     pattern: "[1m]".to_string(),
-                    display_name: "Sonnet 4 1M".to_string(),
+                    display_name: "Sonnet 4.5 1M".to_string(),
                     context_limit: 1_000_000,
                 },
-                ModelEntry {
-                    pattern: "claude-sonnet-4".to_string(),
-                    display_name: "Sonnet 4".to_string(),
-                    context_limit: 200_000,
-                },
-                ModelEntry {
-                    pattern: "claude-4-sonnet".to_string(),
-                    display_name: "Sonnet 4".to_string(),
-                    context_limit: 200_000,
-                },
-                ModelEntry {
-                    pattern: "claude-4-opus".to_string(),
-                    display_name: "Opus 4".to_string(),
-                    context_limit: 200_000,
-                },
-                ModelEntry {
-                    pattern: "sonnet-4".to_string(),
-                    display_name: "Sonnet 4".to_string(),
-                    context_limit: 200_000,
-                },
+                // ModelEntry {
+                //     pattern: "claude-sonnet-4-5".to_string(),
+                //     display_name: "Sonnet 4.5".to_string(),
+                //     context_limit: 200_000,
+                // },
+                // ModelEntry {
+                //     pattern: "claude-sonnet-4".to_string(),
+                //     display_name: "Sonnet 4".to_string(),
+                //     context_limit: 200_000,
+                // },
+                // ModelEntry {
+                //     pattern: "claude-4-sonnet".to_string(),
+                //     display_name: "Sonnet 4".to_string(),
+                //     context_limit: 200_000,
+                // },
+                // ModelEntry {
+                //     pattern: "claude-4-opus".to_string(),
+                //     display_name: "Opus 4".to_string(),
+                //     context_limit: 200_000,
+                // },
+                // ModelEntry {
+                //     pattern: "sonnet-4".to_string(),
+                //     display_name: "Sonnet 4".to_string(),
+                //     context_limit: 200_000,
+                // },
                 ModelEntry {
                     pattern: "claude-3-7-sonnet".to_string(),
                     display_name: "Sonnet 3.7".to_string(),

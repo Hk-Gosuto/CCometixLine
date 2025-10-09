@@ -1,9 +1,29 @@
 use super::{Segment, SegmentData};
-use crate::config::{InputData, ModelConfig, SegmentId, TranscriptEntry};
+use crate::config::{InputData, SegmentId};
+use crate::utils::credentials;
+use chrono::{DateTime, Datelike, Duration, Local, Timelike, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+
+#[derive(Debug, Deserialize)]
+struct ApiUsageResponse {
+    five_hour: UsagePeriod,
+    seven_day: UsagePeriod,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsagePeriod {
+    utilization: f64,
+    resets_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ApiUsageCache {
+    five_hour_utilization: f64,
+    seven_day_utilization: f64,
+    resets_at: Option<String>,
+    cached_at: String,
+}
 
 #[derive(Default)]
 pub struct UsageSegment;
@@ -13,67 +33,238 @@ impl UsageSegment {
         Self
     }
 
-    /// Get context limit for the specified model
-    fn get_context_limit_for_model(model_id: &str) -> u32 {
-        let model_config = ModelConfig::load();
-        model_config.get_context_limit(model_id)
+    fn get_circle_icon(utilization: f64) -> String {
+        let percent = (utilization * 100.0) as u8;
+        match percent {
+            0..=12 => "\u{f0a9e}".to_string(),  // circle_slice_1
+            13..=25 => "\u{f0a9f}".to_string(), // circle_slice_2
+            26..=37 => "\u{f0aa0}".to_string(), // circle_slice_3
+            38..=50 => "\u{f0aa1}".to_string(), // circle_slice_4
+            51..=62 => "\u{f0aa2}".to_string(), // circle_slice_5
+            63..=75 => "\u{f0aa3}".to_string(), // circle_slice_6
+            76..=87 => "\u{f0aa4}".to_string(), // circle_slice_7
+            _ => "\u{f0aa5}".to_string(),       // circle_slice_8
+        }
+    }
+
+    fn format_reset_time(reset_time_str: Option<&str>) -> String {
+        if let Some(time_str) = reset_time_str {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
+                let mut local_dt = dt.with_timezone(&Local);
+                if local_dt.minute() > 45 {
+                    local_dt = local_dt + Duration::hours(1);
+                }
+                return format!(
+                    "{}-{}-{}",
+                    local_dt.month(),
+                    local_dt.day(),
+                    local_dt.hour()
+                );
+            }
+        }
+        "?".to_string()
+    }
+
+    fn get_cache_path() -> Option<std::path::PathBuf> {
+        let home = dirs::home_dir()?;
+        Some(
+            home.join(".claude")
+                .join("ccline")
+                .join(".api_usage_cache.json"),
+        )
+    }
+
+    fn load_cache(&self) -> Option<ApiUsageCache> {
+        let cache_path = Self::get_cache_path()?;
+        if !cache_path.exists() {
+            return None;
+        }
+
+        let content = std::fs::read_to_string(&cache_path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    fn save_cache(&self, cache: &ApiUsageCache) {
+        if let Some(cache_path) = Self::get_cache_path() {
+            if let Some(parent) = cache_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(cache) {
+                let _ = std::fs::write(&cache_path, json);
+            }
+        }
+    }
+
+    fn is_cache_valid(&self, cache: &ApiUsageCache, cache_duration: u64) -> bool {
+        if let Ok(cached_at) = DateTime::parse_from_rfc3339(&cache.cached_at) {
+            let now = Utc::now();
+            let elapsed = now.signed_duration_since(cached_at.with_timezone(&Utc));
+            elapsed.num_seconds() < cache_duration as i64
+        } else {
+            false
+        }
+    }
+
+    fn get_claude_code_version() -> String {
+        use std::process::Command;
+
+        let output = Command::new("npm")
+            .args(["view", "@anthropic-ai/claude-code", "version"])
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !version.is_empty() {
+                    return format!("claude-code/{}", version);
+                }
+            }
+            _ => {}
+        }
+
+        "claude-code".to_string()
+    }
+
+    fn get_proxy_from_settings() -> Option<String> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
+        let settings_path = format!("{}/.claude/settings.json", home);
+
+        let content = std::fs::read_to_string(&settings_path).ok()?;
+        let settings: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+        // Try HTTPS_PROXY first, then HTTP_PROXY
+        settings
+            .get("env")?
+            .get("HTTPS_PROXY")
+            .or_else(|| settings.get("env")?.get("HTTP_PROXY"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    fn fetch_api_usage(
+        &self,
+        api_base_url: &str,
+        token: &str,
+        timeout_secs: u64,
+    ) -> Option<ApiUsageResponse> {
+        let url = format!("{}/api/oauth/usage", api_base_url);
+        let user_agent = Self::get_claude_code_version();
+
+        let mut agent_builder = ureq::AgentBuilder::new();
+
+        // Configure proxy from Claude settings if available
+        if let Some(proxy_url) = Self::get_proxy_from_settings() {
+            if let Ok(proxy) = ureq::Proxy::new(&proxy_url) {
+                agent_builder = agent_builder.proxy(proxy);
+            }
+        }
+
+        let agent = agent_builder.build();
+
+        let response = agent
+            .get(&url)
+            .set("Authorization", &format!("Bearer {}", token))
+            .set("anthropic-beta", "oauth-2025-04-20")
+            .set("User-Agent", &user_agent)
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .call()
+            .ok()?;
+
+        if response.status() == 200 {
+            response.into_json().ok()
+        } else {
+            None
+        }
     }
 }
 
 impl Segment for UsageSegment {
-    fn collect(&self, input: &InputData) -> Option<SegmentData> {
-        // Dynamically determine context limit based on current model ID
-        let context_limit = Self::get_context_limit_for_model(&input.model.id);
+    fn collect(&self, _input: &InputData) -> Option<SegmentData> {
+        let token = credentials::get_oauth_token()?;
 
-        let context_used_token_opt = parse_transcript_usage(&input.transcript_path);
+        // Load config from file to get segment options
+        let config = crate::config::Config::load().ok()?;
+        let segment_config = config.segments.iter().find(|s| s.id == SegmentId::Usage);
 
-        let (percentage_display, tokens_display) = match context_used_token_opt {
-            Some(context_used_token) => {
-                let context_used_rate = (context_used_token as f64 / context_limit as f64) * 100.0;
+        let api_base_url = segment_config
+            .and_then(|sc| sc.options.get("api_base_url"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("https://api.anthropic.com");
 
-                let percentage = if context_used_rate.fract() == 0.0 {
-                    format!("{:.0}%", context_used_rate)
-                } else {
-                    format!("{:.1}%", context_used_rate)
-                };
+        let cache_duration = segment_config
+            .and_then(|sc| sc.options.get("cache_duration"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300);
 
-                let tokens = if context_used_token >= 1000 {
-                    let k_value = context_used_token as f64 / 1000.0;
-                    if k_value.fract() == 0.0 {
-                        format!("{}k", k_value as u32)
+        let timeout = segment_config
+            .and_then(|sc| sc.options.get("timeout"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2);
+
+        let cached_data = self.load_cache();
+        let use_cached = cached_data
+            .as_ref()
+            .map(|cache| self.is_cache_valid(cache, cache_duration))
+            .unwrap_or(false);
+
+        let (five_hour_util, seven_day_util, resets_at) = if use_cached {
+            let cache = cached_data.unwrap();
+            (
+                cache.five_hour_utilization,
+                cache.seven_day_utilization,
+                cache.resets_at,
+            )
+        } else {
+            match self.fetch_api_usage(api_base_url, &token, timeout) {
+                Some(response) => {
+                    let cache = ApiUsageCache {
+                        five_hour_utilization: response.five_hour.utilization,
+                        seven_day_utilization: response.seven_day.utilization,
+                        resets_at: response.seven_day.resets_at.clone(),
+                        cached_at: Utc::now().to_rfc3339(),
+                    };
+                    self.save_cache(&cache);
+                    (
+                        response.five_hour.utilization,
+                        response.seven_day.utilization,
+                        response.seven_day.resets_at,
+                    )
+                }
+                None => {
+                    if let Some(cache) = cached_data {
+                        (
+                            cache.five_hour_utilization,
+                            cache.seven_day_utilization,
+                            cache.resets_at,
+                        )
                     } else {
-                        format!("{:.1}k", k_value)
+                        return None;
                     }
-                } else {
-                    context_used_token.to_string()
-                };
-
-                (percentage, tokens)
-            }
-            None => {
-                // No usage data available
-                ("-".to_string(), "-".to_string())
+                }
             }
         };
 
+        let dynamic_icon = Self::get_circle_icon(seven_day_util / 100.0);
+        let five_hour_percent = five_hour_util.round() as u8;
+        let primary = format!("{}%", five_hour_percent);
+        let secondary = format!("· {}", Self::format_reset_time(resets_at.as_deref()));
+
         let mut metadata = HashMap::new();
-        match context_used_token_opt {
-            Some(context_used_token) => {
-                let context_used_rate = (context_used_token as f64 / context_limit as f64) * 100.0;
-                metadata.insert("tokens".to_string(), context_used_token.to_string());
-                metadata.insert("percentage".to_string(), context_used_rate.to_string());
-            }
-            None => {
-                metadata.insert("tokens".to_string(), "-".to_string());
-                metadata.insert("percentage".to_string(), "-".to_string());
-            }
-        }
-        metadata.insert("limit".to_string(), context_limit.to_string());
-        metadata.insert("model".to_string(), input.model.id.clone());
+        metadata.insert("dynamic_icon".to_string(), dynamic_icon);
+        metadata.insert(
+            "five_hour_utilization".to_string(),
+            five_hour_util.to_string(),
+        );
+        metadata.insert(
+            "seven_day_utilization".to_string(),
+            seven_day_util.to_string(),
+        );
 
         Some(SegmentData {
-            primary: format!("{} · {} tokens", percentage_display, tokens_display),
-            secondary: String::new(),
+            primary,
+            secondary,
             metadata,
         })
     }
@@ -81,192 +272,4 @@ impl Segment for UsageSegment {
     fn id(&self) -> SegmentId {
         SegmentId::Usage
     }
-}
-
-fn parse_transcript_usage<P: AsRef<Path>>(transcript_path: P) -> Option<u32> {
-    let path = transcript_path.as_ref();
-
-    // Try to parse from current transcript file
-    if let Some(usage) = try_parse_transcript_file(path) {
-        return Some(usage);
-    }
-
-    // If file doesn't exist, try to find usage from project history
-    if !path.exists() {
-        if let Some(usage) = try_find_usage_from_project_history(path) {
-            return Some(usage);
-        }
-    }
-
-    None
-}
-
-fn try_parse_transcript_file(path: &Path) -> Option<u32> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader
-        .lines()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_default();
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    // Check if the last line is a summary
-    let last_line = lines.last()?.trim();
-    if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(last_line) {
-        if entry.r#type.as_deref() == Some("summary") {
-            // Handle summary case: find usage by leafUuid
-            if let Some(leaf_uuid) = &entry.leaf_uuid {
-                let project_dir = path.parent()?;
-                return find_usage_by_leaf_uuid(leaf_uuid, project_dir);
-            }
-        }
-    }
-
-    // Normal case: find the last assistant message in current file
-    for line in lines.iter().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(line) {
-            if entry.r#type.as_deref() == Some("assistant") {
-                if let Some(message) = &entry.message {
-                    if let Some(raw_usage) = &message.usage {
-                        let normalized = raw_usage.clone().normalize();
-                        return Some(normalized.display_tokens());
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn find_usage_by_leaf_uuid(leaf_uuid: &str, project_dir: &Path) -> Option<u32> {
-    // Search for the leafUuid across all session files in the project directory
-    let entries = fs::read_dir(project_dir).ok()?;
-
-    for entry in entries {
-        let entry = entry.ok()?;
-        let path = entry.path();
-
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-
-        if let Some(usage) = search_uuid_in_file(&path, leaf_uuid) {
-            return Some(usage);
-        }
-    }
-
-    None
-}
-
-fn search_uuid_in_file(path: &Path, target_uuid: &str) -> Option<u32> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader
-        .lines()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_default();
-
-    // Find the message with target_uuid
-    for line in &lines {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(line) {
-            if let Some(uuid) = &entry.uuid {
-                if uuid == target_uuid {
-                    // Found the target message, check its type
-                    if entry.r#type.as_deref() == Some("assistant") {
-                        // Direct assistant message with usage
-                        if let Some(message) = &entry.message {
-                            if let Some(raw_usage) = &message.usage {
-                                let normalized = raw_usage.clone().normalize();
-                                return Some(normalized.display_tokens());
-                            }
-                        }
-                    } else if entry.r#type.as_deref() == Some("user") {
-                        // User message, need to find the parent assistant message
-                        if let Some(parent_uuid) = &entry.parent_uuid {
-                            return find_assistant_message_by_uuid(&lines, parent_uuid);
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn find_assistant_message_by_uuid(lines: &[String], target_uuid: &str) -> Option<u32> {
-    for line in lines {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(line) {
-            if let Some(uuid) = &entry.uuid {
-                if uuid == target_uuid && entry.r#type.as_deref() == Some("assistant") {
-                    if let Some(message) = &entry.message {
-                        if let Some(raw_usage) = &message.usage {
-                            let normalized = raw_usage.clone().normalize();
-                            return Some(normalized.display_tokens());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn try_find_usage_from_project_history(transcript_path: &Path) -> Option<u32> {
-    let project_dir = transcript_path.parent()?;
-
-    // Find the most recent session file in the project directory
-    let mut session_files: Vec<PathBuf> = Vec::new();
-    let entries = fs::read_dir(project_dir).ok()?;
-
-    for entry in entries {
-        let entry = entry.ok()?;
-        let path = entry.path();
-
-        if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            session_files.push(path);
-        }
-    }
-
-    if session_files.is_empty() {
-        return None;
-    }
-
-    // Sort by modification time (most recent first)
-    session_files.sort_by_key(|path| {
-        fs::metadata(path)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH)
-    });
-    session_files.reverse();
-
-    // Try to find usage from the most recent session
-    for session_path in &session_files {
-        if let Some(usage) = try_parse_transcript_file(session_path) {
-            return Some(usage);
-        }
-    }
-
-    None
 }

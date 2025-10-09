@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Load and patch
         let mut patcher = ClaudeCodePatcher::new(&claude_path)?;
 
-        // Apply both modifications
+        // Apply all modifications
         println!("\n🔄 Applying patches...");
 
         // 1. Set verbose property to true
@@ -81,6 +81,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 2. Disable context low warnings
         patcher.disable_context_low_warnings()?;
+
+        // 3. Disable ESC interrupt display
+        if let Err(e) = patcher.disable_esc_interrupt_display() {
+            println!("⚠️ Could not disable esc/interrupt display: {}", e);
+        }
 
         patcher.save()?;
 

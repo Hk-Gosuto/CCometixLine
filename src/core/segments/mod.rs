@@ -1,3 +1,4 @@
+pub mod context_window;
 pub mod cost;
 pub mod directory;
 pub mod git;
@@ -25,6 +26,7 @@ pub struct SegmentData {
 }
 
 // Re-export all segment types
+pub use context_window::ContextWindowSegment;
 pub use cost::CostSegment;
 pub use directory::DirectorySegment;
 pub use git::GitSegment;

@@ -61,9 +61,9 @@ pub fn git_segment() -> SegmentConfig {
     }
 }
 
-pub fn usage_segment() -> SegmentConfig {
+pub fn context_window_segment() -> SegmentConfig {
     SegmentConfig {
-        id: SegmentId::Usage,
+        id: SegmentId::ContextWindow,
         enabled: true,
         icon: IconConfig {
             plain: "⚡️".to_string(),
@@ -133,20 +133,32 @@ pub fn output_style_segment() -> SegmentConfig {
     }
 }
 
-pub fn quota_segment() -> SegmentConfig {
+pub fn usage_segment() -> SegmentConfig {
     SegmentConfig {
-        id: SegmentId::Quota,
-        enabled: true,
+        id: SegmentId::Usage,
+        enabled: false,
         icon: IconConfig {
             plain: "📊".to_string(),
-            nerd_font: "\u{f0e4e}".to_string(),
+            nerd_font: "\u{f0a9e}".to_string(),
         },
         colors: ColorConfig {
-            icon: Some(AnsiColor::Color256 { c256: 167 }), // Gruvbox red
-            text: Some(AnsiColor::Color256 { c256: 167 }),
+            icon: Some(AnsiColor::Color16 { c16: 14 }),
+            text: Some(AnsiColor::Color16 { c16: 14 }),
             background: None,
         },
-        styles: TextStyleConfig { text_bold: true },
-        options: HashMap::new(),
+        styles: TextStyleConfig::default(),
+        options: {
+            let mut opts = HashMap::new();
+            opts.insert(
+                "api_base_url".to_string(),
+                serde_json::Value::String("https://api.anthropic.com".to_string()),
+            );
+            opts.insert(
+                "cache_duration".to_string(),
+                serde_json::Value::Number(180.into()),
+            );
+            opts.insert("timeout".to_string(), serde_json::Value::Number(2.into()));
+            opts
+        },
     }
 }

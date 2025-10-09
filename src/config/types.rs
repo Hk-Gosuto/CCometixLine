@@ -67,6 +67,7 @@ pub enum SegmentId {
     Model,
     Directory,
     Git,
+    ContextWindow,
     Usage,
     Cost,
     Session,
@@ -81,7 +82,7 @@ pub struct SegmentsConfig {
     pub directory: bool,
     pub git: bool,
     pub model: bool,
-    pub usage: bool,
+    // pub usage: bool,
 }
 
 // Data structures compatible with existing main.rs

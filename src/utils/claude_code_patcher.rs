@@ -291,4 +291,90 @@ impl ClaudeCodePatcher {
 
         Ok(())
     }
+
+    /// Find the ternary condition for esc/interrupt display
+    /// Pattern: ...CONDITION?[...{key:"esc"}...,"to interrupt"...]:[]
+    /// Returns the position of CONDITION that needs to be replaced with (false)
+    fn find_esc_interrupt_condition(&self) -> Option<LocationResult> {
+        let anchor1 = r#"{key:"esc"}"#;
+        let anchor2 = r#""to interrupt""#;
+
+        let mut search_start = 0;
+        while let Some(anchor1_offset) = self.file_content[search_start..].find(anchor1) {
+            let anchor1_pos = search_start + anchor1_offset;
+
+            let search_window_end = (anchor1_pos + 200).min(self.file_content.len());
+            let window = &self.file_content[anchor1_pos..search_window_end];
+
+            if window.contains(anchor2) {
+                println!(
+                    "Found both anchors: {{key:\"esc\"}} at {} and \"to interrupt\" nearby",
+                    anchor1_pos
+                );
+
+                let before_anchor = &self.file_content[..anchor1_pos];
+                if let Some(spread_offset) = before_anchor.rfind("...") {
+                    let spread_pos = spread_offset;
+                    println!("  Found spread operator at: {}", spread_pos);
+
+                    let between_spread_and_anchor = &self.file_content[spread_pos..anchor1_pos];
+                    if let Some(question_offset) = between_spread_and_anchor.find('?') {
+                        let question_pos = spread_pos + question_offset;
+
+                        let condition_start = spread_pos + 3;
+                        let condition_end = question_pos;
+
+                        let condition = &self.file_content[condition_start..condition_end];
+                        println!(
+                            "  Found condition '{}' at {}-{}",
+                            condition.trim(),
+                            condition_start,
+                            condition_end
+                        );
+
+                        return Some(LocationResult {
+                            start_index: condition_start,
+                            end_index: condition_end,
+                            variable_name: Some(condition.trim().to_string()),
+                        });
+                    }
+                }
+            }
+
+            search_start = anchor1_pos + 1;
+        }
+
+        None
+    }
+
+    /// Disable "esc to interrupt" display by replacing ternary condition with (false)
+    /// Changes: ...H1?[esc elements]:[] → ...(false)?[esc elements]:[]
+    pub fn disable_esc_interrupt_display(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let location = self
+            .find_esc_interrupt_condition()
+            .ok_or("Could not find esc/interrupt ternary condition")?;
+
+        let original_condition = location
+            .variable_name
+            .as_ref()
+            .ok_or("No condition variable found")?;
+
+        println!(
+            "Replacing condition '{}' with '(false)' at position {}-{}",
+            original_condition, location.start_index, location.end_index
+        );
+
+        self.show_diff("(false)", location.start_index, location.end_index);
+
+        let new_content = format!(
+            "{}(false){}",
+            &self.file_content[..location.start_index],
+            &self.file_content[location.end_index..]
+        );
+
+        self.file_content = new_content;
+        println!("✅ ESC interrupt display disabled successfully");
+
+        Ok(())
+    }
 }

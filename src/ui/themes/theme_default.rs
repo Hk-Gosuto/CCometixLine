@@ -61,9 +61,9 @@ pub fn git_segment() -> SegmentConfig {
     }
 }
 
-pub fn usage_segment() -> SegmentConfig {
+pub fn context_window_segment() -> SegmentConfig {
     SegmentConfig {
-        id: SegmentId::Usage,
+        id: SegmentId::ContextWindow,
         enabled: true,
         icon: IconConfig {
             plain: "⚡️".to_string(),
@@ -76,6 +76,36 @@ pub fn usage_segment() -> SegmentConfig {
         },
         styles: TextStyleConfig::default(),
         options: HashMap::new(),
+    }
+}
+
+pub fn usage_segment() -> SegmentConfig {
+    SegmentConfig {
+        id: SegmentId::Usage,
+        enabled: false,
+        icon: IconConfig {
+            plain: "📊".to_string(),
+            nerd_font: "\u{f0a9e}".to_string(), // circle_slice_1
+        },
+        colors: ColorConfig {
+            icon: Some(AnsiColor::Color16 { c16: 14 }), // Cyan
+            text: Some(AnsiColor::Color16 { c16: 14 }),
+            background: None,
+        },
+        styles: TextStyleConfig::default(),
+        options: {
+            let mut opts = HashMap::new();
+            opts.insert(
+                "api_base_url".to_string(),
+                serde_json::Value::String("https://api.anthropic.com".to_string()),
+            );
+            opts.insert(
+                "cache_duration".to_string(),
+                serde_json::Value::Number(180.into()),
+            );
+            opts.insert("timeout".to_string(), serde_json::Value::Number(2.into()));
+            opts
+        },
     }
 }
 
