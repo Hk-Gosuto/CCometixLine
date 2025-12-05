@@ -15,7 +15,7 @@ struct QuotaSnapshot {
     overage_permitted: bool,
     percent_remaining: f64,
     quota_id: String,
-    quota_remaining: u32,
+    quota_remaining: f64,
     remaining: u32,
     unlimited: bool,
     timestamp_utc: String,
@@ -72,7 +72,7 @@ impl QuotaSegment {
     /// Read ANTHROPIC_BASE_URL from Claude settings
     fn get_anthropic_base_url() -> Option<String> {
         let settings_path = Self::get_claude_settings_path()?;
-        let content = fs::read_to_string(settings_path).ok()?;
+        let content = fs::read_to_string(&settings_path).ok()?;
         let settings: ClaudeSettings = serde_json::from_str(&content).ok()?;
         settings.env?.anthropic_base_url
     }
