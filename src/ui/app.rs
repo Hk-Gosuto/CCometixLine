@@ -161,16 +161,19 @@ impl App {
                         KeyCode::Up => app.icon_selector.move_selection(-1),
                         KeyCode::Down => app.icon_selector.move_selection(1),
                         KeyCode::Tab => app.icon_selector.toggle_style(),
-                        KeyCode::Char('c') => app.icon_selector.start_custom_input(),
+                        KeyCode::Char('c') if !app.icon_selector.editing_custom => {
+                            app.icon_selector.start_custom_input()
+                        }
                         KeyCode::Enter => {
-                            if app.icon_selector.editing_custom {
-                                app.icon_selector.finish_custom_input();
-                            } else {
-                                if let Some(icon) = app.icon_selector.get_selected_icon() {
-                                    app.apply_selected_icon(icon);
-                                }
-                                app.icon_selector.close();
+                            if app.icon_selector.editing_custom
+                                && !app.icon_selector.finish_custom_input()
+                            {
+                                continue;
                             }
+                            if let Some(icon) = app.icon_selector.get_selected_icon() {
+                                app.apply_selected_icon(icon);
+                            }
+                            app.icon_selector.close();
                         }
                         KeyCode::Char(c) if app.icon_selector.editing_custom => {
                             app.icon_selector.input_char(c);
@@ -337,13 +340,13 @@ impl App {
             }
         }
 
-        // Add line for status message if present
+        // Add lines for status message if present (empty line + message)
         if self.status_message.is_some() {
-            lines_needed += 1;
+            lines_needed += 2;
         }
 
-        // Return height: content lines + borders, max 6
-        (lines_needed + 2).clamp(3, 6)
+        // Return height: content lines + borders, max 8
+        (lines_needed + 2).clamp(3, 8)
     }
 
     fn ui(&mut self, f: &mut Frame) {

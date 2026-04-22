@@ -1,12 +1,19 @@
-use regex::Regex;
 use std::fs;
 use std::path::Path;
+use tree_sitter::{Node, Parser, Tree};
 
 #[derive(Debug, Clone)]
 pub struct LocationResult {
     pub start_index: usize,
     pub end_index: usize,
     pub variable_name: Option<String>,
+}
+
+/// Information about a patch to be applied
+#[derive(Debug)]
+struct PatchInfo {
+    location: LocationResult,
+    replacement: String,
 }
 
 #[derive(Debug)]
@@ -26,72 +33,578 @@ impl ClaudeCodePatcher {
         })
     }
 
-    /// Find the verbose property location in Claude Code's cli.js
-    /// Based on the pattern from patching.ts getVerbosePropertyLocation function
-    pub fn get_verbose_property_location(&self) -> Option<LocationResult> {
-        // Step 1: Find createElement pattern with spinnerTip and overrideMessage
-        let create_element_pattern =
-            Regex::new(r"createElement\([$\w]+,\{[^}]+spinnerTip[^}]+overrideMessage[^}]+\}")
-                .ok()?;
+    /// Get the version of Claude Code from the file header
+    /// Format: // Version: X.Y.Z
+    pub fn get_version(&self) -> Option<(u32, u32, u32)> {
+        // Look for "// Version: X.Y.Z" in the first 500 bytes
+        let header = &self.file_content[..std::cmp::min(500, self.file_content.len())];
 
-        let create_element_match = create_element_pattern.find(&self.file_content)?;
-        let extracted_string =
-            &self.file_content[create_element_match.start()..create_element_match.end()];
+        for line in header.lines() {
+            if line.starts_with("// Version:") {
+                let version_str = line.trim_start_matches("// Version:").trim();
+                let parts: Vec<&str> = version_str.split('.').collect();
+                if parts.len() >= 3 {
+                    let major = parts[0].parse().ok()?;
+                    let minor = parts[1].parse().ok()?;
+                    let patch = parts[2].parse().ok()?;
+                    return Some((major, minor, patch));
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if version is >= the specified version
+    pub fn version_gte(&self, major: u32, minor: u32, patch: u32) -> bool {
+        if let Some((v_major, v_minor, v_patch)) = self.get_version() {
+            if v_major > major {
+                return true;
+            }
+            if v_major == major && v_minor > minor {
+                return true;
+            }
+            if v_major == major && v_minor == minor && v_patch >= patch {
+                return true;
+            }
+        }
+        false
+    }
+
+    // =========================================================================
+    // Core parsing - parse once and reuse
+    // =========================================================================
+
+    /// Parse the file content into an AST tree (called once)
+    fn parse_tree(&self) -> Option<Tree> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .ok()?;
+        parser.parse(&self.file_content, None)
+    }
+
+    /// Get the text content of a node
+    fn get_node_text(&self, node: Node) -> String {
+        self.file_content[node.start_byte()..node.end_byte()].to_string()
+    }
+
+    // =========================================================================
+    // Patch 1: Spinner Token Counter (verbose property)
+    // Enables detailed token usage display: "1m 38s · ↑ 2.8k tokens"
+    // =========================================================================
+
+    /// Find the Spinner verbose property location using cached AST
+    fn find_spinner_verbose_property(&self, root: Node) -> Option<LocationResult> {
+        self.find_spinner_verbose_in_node(root)
+    }
+
+    /// Recursively search for Spinner verbose property in createElement calls
+    /// Uses depth-first search but checks children BEFORE parent to find the most specific match
+    fn find_spinner_verbose_in_node(&self, node: Node) -> Option<LocationResult> {
+        // First, recursively search children (depth-first, children before parent)
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_spinner_verbose_in_node(child) {
+                return Some(result);
+            }
+        }
+
+        // Then check if this node is the target createElement call
+        if node.kind() == "call_expression" {
+            if let Some(result) = self.check_spinner_verbose_call(node) {
+                return Some(result);
+            }
+        }
+
+        None
+    }
+
+    /// Check if a call_expression is the Spinner createElement with verbose property
+    fn check_spinner_verbose_call(&self, node: Node) -> Option<LocationResult> {
+        let function = node.child_by_field_name("function")?;
+        let function_text = self.get_node_text(function);
+
+        if !function_text.ends_with("createElement") && function_text != "createElement" {
+            return None;
+        }
+
+        let arguments = node.child_by_field_name("arguments")?;
+        let props_object = self.get_nth_argument(arguments, 1)?;
+
+        if props_object.kind() != "object" {
+            return None;
+        }
+
+        let has_spinner_tip = self.object_has_direct_key(props_object, "spinnerTip");
+        let has_override_message = self.object_has_direct_key(props_object, "overrideMessage");
+
+        if !has_spinner_tip || !has_override_message {
+            return None;
+        }
 
         println!(
-            "Found createElement match at: {}-{}",
-            create_element_match.start(),
-            create_element_match.end()
+            "Found Spinner component with spinnerTip and overrideMessage at {}-{}",
+            node.start_byte(),
+            node.end_byte()
+        );
+
+        self.find_spinner_verbose_in_object(props_object)
+    }
+
+    fn get_nth_argument<'a>(&self, arguments: Node<'a>, index: usize) -> Option<Node<'a>> {
+        let mut cursor = arguments.walk();
+        let mut current_index = 0;
+
+        for child in arguments.children(&mut cursor) {
+            if child.kind() == "(" || child.kind() == ")" || child.kind() == "," {
+                continue;
+            }
+            if current_index == index {
+                return Some(child);
+            }
+            current_index += 1;
+        }
+        None
+    }
+
+    fn object_has_direct_key(&self, object: Node, key_name: &str) -> bool {
+        let mut cursor = object.walk();
+        for child in object.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(key) = child.child_by_field_name("key") {
+                    if self.get_node_text(key) == key_name {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn find_spinner_verbose_in_object(&self, object: Node) -> Option<LocationResult> {
+        let mut cursor = object.walk();
+        for child in object.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(key) = child.child_by_field_name("key") {
+                    if self.get_node_text(key) == "verbose" {
+                        let start = child.start_byte();
+                        let end = child.end_byte();
+                        let text = self.get_node_text(child);
+
+                        println!(
+                            "Found Spinner verbose property: '{}' at {}-{}",
+                            text, start, end
+                        );
+
+                        return Some(LocationResult {
+                            start_index: start,
+                            end_index: end,
+                            variable_name: Some(text),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // =========================================================================
+    // Patch 2: Context Low Warnings
+    // =========================================================================
+
+    /// Find context low condition using cached AST
+    fn find_context_low_condition(&self, root: Node) -> Option<LocationResult> {
+        self.find_context_low_if_statement(root)
+    }
+
+    fn find_context_low_if_statement(&self, node: Node) -> Option<LocationResult> {
+        if node.kind() == "function_declaration" || node.kind() == "function" {
+            let node_text = self.get_node_text(node);
+
+            if node_text.contains("Context low (") {
+                println!(
+                    "Found context low function at {}-{}",
+                    node.start_byte(),
+                    node.end_byte()
+                );
+                return self.find_if_return_null_in_function(node);
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_context_low_if_statement(child) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn find_if_return_null_in_function(&self, node: Node) -> Option<LocationResult> {
+        if node.kind() == "if_statement" {
+            let node_text = self.get_node_text(node);
+
+            if node_text.contains("return null") && !node_text.contains("else") {
+                let consequence = node.child_by_field_name("consequence")?;
+                let consequence_text = self.get_node_text(consequence);
+
+                if consequence_text.trim() == "return null"
+                    || consequence_text.contains("return null;")
+                {
+                    let start = node.start_byte();
+                    let end = node.end_byte();
+
+                    println!(
+                        "Found if statement: '{}' at {}-{}",
+                        node_text.trim(),
+                        start,
+                        end
+                    );
+
+                    return Some(LocationResult {
+                        start_index: start,
+                        end_index: end,
+                        variable_name: Some(node_text),
+                    });
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_if_return_null_in_function(child) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    // =========================================================================
+    // Patch 3: ESC Interrupt Display
+    // =========================================================================
+
+    /// Find ESC interrupt condition using cached AST
+    fn find_esc_interrupt_condition(&self, root: Node) -> Option<LocationResult> {
+        println!("Parsing JavaScript with tree-sitter...");
+
+        let result = self.find_esc_ternary_in_node(root);
+
+        if result.is_some() {
+            println!("  ✅ Found ESC interrupt ternary via AST");
+        } else {
+            println!("  ❌ Could not find ESC interrupt ternary in AST");
+        }
+
+        result
+    }
+
+    fn find_esc_ternary_in_node(&self, node: Node) -> Option<LocationResult> {
+        if node.kind() == "ternary_expression" {
+            if let Some(result) = self.check_esc_ternary(node) {
+                return Some(result);
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_esc_ternary_in_node(child) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn check_esc_ternary(&self, node: Node) -> Option<LocationResult> {
+        let condition = node.child_by_field_name("condition")?;
+        let consequence = node.child_by_field_name("consequence")?;
+        let alternative = node.child_by_field_name("alternative")?;
+
+        let consequence_text = self.get_node_text(consequence);
+        let alternative_text = self.get_node_text(alternative);
+
+        if !consequence_text.contains(r#"key:"esc""#) {
+            return None;
+        }
+
+        if alternative_text.trim() != "[]" {
+            return None;
+        }
+
+        let condition_start = condition.start_byte();
+        let condition_end = condition.end_byte();
+        let condition_text = self.get_node_text(condition);
+
+        println!(
+            "  Found ESC ternary: condition='{}' at {}-{}",
+            condition_text, condition_start, condition_end
         );
         println!(
-            "Extracted string: {}",
-            &extracted_string[..std::cmp::min(200, extracted_string.len())]
+            "    consequence contains key:\"esc\": {}",
+            consequence_text.len() > 50
         );
-
-        // Step 2: Find verbose property within the createElement match
-        let verbose_pattern = Regex::new(r"verbose:[^,}]+").ok()?;
-        let verbose_match = verbose_pattern.find(extracted_string)?;
-
         println!(
-            "Found verbose match at: {}-{}",
-            verbose_match.start(),
-            verbose_match.end()
+            "    alternative is empty array: {}",
+            alternative_text == "[]"
         );
-        println!("Verbose string: {}", verbose_match.as_str());
-
-        // Calculate absolute positions in the original file
-        let absolute_verbose_start = create_element_match.start() + verbose_match.start();
-        let absolute_verbose_end = absolute_verbose_start + verbose_match.len();
 
         Some(LocationResult {
-            start_index: absolute_verbose_start,
-            end_index: absolute_verbose_end,
-            variable_name: None,
+            start_index: condition_start,
+            end_index: condition_end,
+            variable_name: Some(condition_text),
         })
     }
 
-    /// Write the verbose property with new value
-    pub fn write_verbose_property(
-        &mut self,
-        value: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let location = self
-            .get_verbose_property_location()
-            .ok_or("Failed to find verbose property location")?;
+    // =========================================================================
+    // Patch 4: Chrome Subscription Check
+    // =========================================================================
 
-        let new_code = format!("verbose:{}", value);
+    /// Find Chrome subscription check using cached AST and anchor
+    fn find_chrome_subscription_check(&self, root: Node) -> Option<LocationResult> {
+        let anchor = "tengu_claude_in_chrome_setup";
+        let anchor_pos = self.file_content.find(anchor)?;
+        println!("Found anchor '{}' at position: {}", anchor, anchor_pos);
 
-        let new_content = format!(
-            "{}{}{}",
-            &self.file_content[..location.start_index],
-            new_code,
-            &self.file_content[location.end_index..]
+        self.find_chrome_check_in_node(root, anchor_pos)
+    }
+
+    fn find_chrome_check_in_node(&self, node: Node, anchor_pos: usize) -> Option<LocationResult> {
+        if (node.kind() == "lexical_declaration" || node.kind() == "variable_declaration")
+            && node.end_byte() < anchor_pos
+            && anchor_pos - node.end_byte() < 300
+        {
+            if let Some(result) = self.check_chrome_declaration(node) {
+                return Some(result);
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_chrome_check_in_node(child, anchor_pos) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn check_chrome_declaration(&self, node: Node) -> Option<LocationResult> {
+        let node_text = self.get_node_text(node);
+
+        if !node_text.contains(".chrome") || !node_text.contains("&&") {
+            return None;
+        }
+
+        println!("Found Chrome check pattern: '{}'", node_text);
+        self.find_and_expression_in_node(node)
+    }
+
+    fn find_and_expression_in_node(&self, node: Node) -> Option<LocationResult> {
+        if node.kind() == "binary_expression" {
+            let node_text = self.get_node_text(node);
+            if node_text.contains("&&") {
+                let left = node.child_by_field_name("left")?;
+                let left_text = self.get_node_text(left);
+
+                if left_text.contains(".chrome") {
+                    let right = node.child_by_field_name("right")?;
+                    let and_start = left.end_byte();
+                    let and_end = right.end_byte();
+                    let and_text = self.file_content[and_start..and_end].to_string();
+
+                    println!(
+                        "Part to remove: '{}' at {}-{}",
+                        and_text, and_start, and_end
+                    );
+
+                    return Some(LocationResult {
+                        start_index: and_start,
+                        end_index: and_end,
+                        variable_name: Some(and_text),
+                    });
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_and_expression_in_node(child) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    // =========================================================================
+    // Patch 5: /chrome Command Message
+    // =========================================================================
+
+    /// Find /chrome command message using cached AST and anchor
+    fn find_chrome_command_message(&self, root: Node) -> Option<LocationResult> {
+        let anchor = r#""Claude in Chrome requires a claude.ai subscription.""#;
+        let anchor_pos = self.file_content.find(anchor)?;
+        println!(
+            "Found /chrome subscription message at position: {}",
+            anchor_pos
         );
 
-        self.show_diff(&new_code, location.start_index, location.end_index);
-        self.file_content = new_content;
+        self.find_chrome_message_condition(root, anchor_pos)
+    }
 
-        Ok(())
+    fn find_chrome_message_condition(
+        &self,
+        node: Node,
+        anchor_pos: usize,
+    ) -> Option<LocationResult> {
+        if node.kind() == "binary_expression"
+            && node.start_byte() < anchor_pos
+            && anchor_pos - node.start_byte() < 100
+        {
+            if let Some(result) = self.check_not_and_expression(node, anchor_pos) {
+                return Some(result);
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_chrome_message_condition(child, anchor_pos) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn check_not_and_expression(&self, node: Node, anchor_pos: usize) -> Option<LocationResult> {
+        let left = node.child_by_field_name("left")?;
+        let operator = node.child_by_field_name("operator")?;
+
+        if self.get_node_text(operator) != "&&" {
+            return None;
+        }
+
+        if left.kind() != "unary_expression" {
+            return None;
+        }
+
+        let left_text = self.get_node_text(left);
+        if !left_text.starts_with("!") {
+            return None;
+        }
+
+        let node_start = node.start_byte();
+        let node_end = node.end_byte();
+
+        if anchor_pos >= node_start && anchor_pos <= node_end {
+            let op_end = operator.end_byte();
+            let replace_start = left.start_byte();
+            let replace_end = op_end;
+            let replace_text = self.file_content[replace_start..replace_end].to_string();
+
+            println!(
+                "  Found condition '{}' at {}-{}",
+                replace_text, replace_start, replace_end
+            );
+
+            return Some(LocationResult {
+                start_index: replace_start,
+                end_index: replace_end,
+                variable_name: Some(replace_text),
+            });
+        }
+
+        None
+    }
+
+    // =========================================================================
+    // Patch 6: Chrome Startup Notification
+    // =========================================================================
+
+    /// Find Chrome startup notification using cached AST and anchor
+    fn find_chrome_startup_notification_check(&self, root: Node) -> Option<LocationResult> {
+        let anchor = r#"key:"chrome-requires-subscription""#;
+        let anchor_pos = self.file_content.find(anchor)?;
+        println!(
+            "Found Chrome startup notification anchor at position: {}",
+            anchor_pos
+        );
+
+        self.find_startup_notification_if(root, anchor_pos)
+    }
+
+    fn find_startup_notification_if(
+        &self,
+        node: Node,
+        anchor_pos: usize,
+    ) -> Option<LocationResult> {
+        if node.kind() == "if_statement"
+            && node.start_byte() < anchor_pos
+            && anchor_pos - node.start_byte() < 150
+        {
+            let node_text = self.get_node_text(node);
+            if node_text.contains("chrome-requires-subscription") {
+                if let Some(result) = self.check_startup_notification_condition(node) {
+                    return Some(result);
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_startup_notification_if(child, anchor_pos) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn check_startup_notification_condition(&self, node: Node) -> Option<LocationResult> {
+        let condition = node.child_by_field_name("condition")?;
+
+        if condition.kind() == "parenthesized_expression" {
+            let mut cursor = condition.walk();
+            for child in condition.children(&mut cursor) {
+                if child.kind() == "unary_expression" {
+                    let child_text = self.get_node_text(child);
+                    if child_text.starts_with("!") && child_text.contains("()") {
+                        let start = child.start_byte();
+                        let end = child.end_byte();
+
+                        println!("  Found condition '{}' at {}-{}", child_text, start, end);
+
+                        return Some(LocationResult {
+                            start_index: start,
+                            end_index: end,
+                            variable_name: Some(child_text),
+                        });
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    // =========================================================================
+    // Utility functions
+    // =========================================================================
+
+    /// Show a diff of the changes (for debugging)
+    fn show_diff(&self, title: &str, injected_text: &str, start_index: usize, end_index: usize) {
+        let context_start = start_index.saturating_sub(50);
+        let context_end_old = std::cmp::min(self.file_content.len(), end_index + 50);
+
+        let old_before = &self.file_content[context_start..start_index];
+        let old_changed = &self.file_content[start_index..end_index];
+        let old_after = &self.file_content[end_index..context_end_old];
+
+        println!("\n--- {} Diff ---", title);
+        println!(
+            "OLD: {}\x1b[31m{}\x1b[0m{}",
+            old_before, old_changed, old_after
+        );
+        println!(
+            "NEW: {}\x1b[32m{}\x1b[0m{}",
+            old_before, injected_text, old_after
+        );
+        println!("--- End Diff ---\n");
     }
 
     /// Save the modified content back to file
@@ -105,276 +618,227 @@ impl ClaudeCodePatcher {
         &self.file_content
     }
 
-    /// Show a diff of the changes (for debugging)
-    fn show_diff(&self, injected_text: &str, start_index: usize, end_index: usize) {
-        let context_start = start_index.saturating_sub(50);
-        let context_end_old = std::cmp::min(self.file_content.len(), end_index + 50);
+    // =========================================================================
+    // Optimized batch patching - parse once, apply all
+    // =========================================================================
 
-        let old_before = &self.file_content[context_start..start_index];
-        let old_changed = &self.file_content[start_index..end_index];
-        let old_after = &self.file_content[end_index..context_end_old];
+    /// Apply all patches using optimized single-parse strategy
+    /// Returns results in the same order as the original implementation
+    pub fn apply_all_patches(&mut self) -> Vec<(&'static str, bool)> {
+        let mut results = Vec::new();
 
-        println!("\n--- Verbose Property Diff ---");
-        println!(
-            "OLD: {}\x1b[31m{}\x1b[0m{}",
-            old_before, old_changed, old_after
-        );
-        println!(
-            "NEW: {}\x1b[32m{}\x1b[0m{}",
-            old_before, injected_text, old_after
-        );
-        println!("--- End Diff ---\n");
-    }
-
-    /// Find the context low message location in Claude Code's cli.js
-    /// Pattern: "Context low (",B,"% remaining) · Run /compact to compact & continue"
-    /// where B is a variable name
-    pub fn get_context_low_message_location(&self) -> Option<LocationResult> {
-        // Pattern to match: "Context low (",{variable},"% remaining) · Run /compact to compact & continue"
-        let context_low_pattern = Regex::new(
-            r#""Context low \(",([^,]+),"% remaining\) · Run /compact to compact & continue""#,
-        )
-        .ok()?;
-
-        let context_low_match = context_low_pattern.find(&self.file_content)?;
-
-        println!(
-            "Found context low match at: {}-{}",
-            context_low_match.start(),
-            context_low_match.end()
-        );
-        println!("Context low string: {}", context_low_match.as_str());
-
-        // Extract the variable name from the capture group
-        let captures = context_low_pattern.captures(&self.file_content)?;
-        let variable_name = captures.get(1)?.as_str();
-
-        println!("Variable name: {}", variable_name);
-
-        Some(LocationResult {
-            start_index: context_low_match.start(),
-            end_index: context_low_match.end(),
-            variable_name: Some(variable_name.to_string()),
-        })
-    }
-
-    /// Core robust function locator using anchor-based expansion
-    /// Uses stable text patterns to survive Claude Code version updates
-    pub fn find_context_low_function_robust(&self) -> Option<LocationResult> {
-        // Step 1: Locate stable anchor text that survives obfuscation
-        let primary_anchor = "Context low (";
-        let anchor_pos = self.file_content.find(primary_anchor)?;
-
-        // Step 2: Search backward within reasonable range to find function declarations
-        let search_range = 800; // Optimized range based on actual function size (~466 chars)
-        let search_start = anchor_pos.saturating_sub(search_range);
-        let backward_text = &self.file_content[search_start..anchor_pos];
-
-        // Find the function declaration that contains our anchor
-        let mut function_candidates = Vec::new();
-        let mut start = 0;
-
-        while let Some(func_pos) = backward_text[start..].find("function ") {
-            let absolute_func_pos = search_start + start + func_pos;
-
-            // Check if this function contains the expected stable patterns
-            let func_to_anchor_text = &self.file_content[absolute_func_pos..anchor_pos + 100];
-
-            if func_to_anchor_text.contains("tokenUsage:") {
-                function_candidates.push(absolute_func_pos);
-                println!("Found function candidate at: {}", absolute_func_pos);
+        // Parse AST only once
+        let tree = match self.parse_tree() {
+            Some(t) => t,
+            None => {
+                println!("⚠️ Failed to parse JavaScript AST");
+                return vec![
+                    ("Spinner token counter", false),
+                    ("Context low warnings", false),
+                    ("ESC interrupt display", false),
+                    ("Chrome subscription check", false),
+                    ("/chrome command message", false),
+                    ("Chrome startup notification", false),
+                ];
             }
+        };
 
-            start += func_pos + 9; // Move past "function "
+        let root = tree.root_node();
+        let mut patches: Vec<PatchInfo> = Vec::new();
+
+        // 1. Spinner token counter (verbose property)
+        match self.find_spinner_verbose_property(root) {
+            Some(loc) => {
+                let replacement = "verbose:true".to_string();
+                self.show_diff(
+                    "Spinner Token Counter",
+                    &replacement,
+                    loc.start_index,
+                    loc.end_index,
+                );
+                patches.push(PatchInfo {
+                    location: loc,
+                    replacement,
+                });
+                results.push(("Spinner token counter", true));
+            }
+            None => {
+                println!("⚠️ Could not enable Spinner token counter");
+                results.push(("Spinner token counter", false));
+            }
         }
 
-        // Use the closest function to anchor (last candidate found)
-        if let Some(&func_start) = function_candidates.last() {
-            println!("Selected function start at: {}", func_start);
-
-            // We only need the function start for condition replacement
-            // Return a minimal range that includes the condition
-            let condition_search_end = anchor_pos + 100; // Small range after anchor
-
-            Some(LocationResult {
-                start_index: func_start,
-                end_index: condition_search_end,
-                variable_name: Some("context_function".to_string()),
-            })
-        } else {
-            println!("❌ No suitable function candidate found");
-            None
+        // 2. Context low warnings
+        match self.find_context_low_condition(root) {
+            Some(loc) => {
+                let replacement = "if(true)return null;".to_string();
+                self.show_diff(
+                    "Context Low Condition",
+                    &replacement,
+                    loc.start_index,
+                    loc.end_index,
+                );
+                patches.push(PatchInfo {
+                    location: loc,
+                    replacement,
+                });
+                results.push(("Context low warnings", true));
+            }
+            None => {
+                println!("⚠️ Could not disable context low warnings");
+                results.push(("Context low warnings", false));
+            }
         }
-    }
 
-    /// Core robust condition locator that finds the if statement to patch
-    /// Returns the exact location of 'if(!Q||D)return null' for replacement with 'if(true)return null'
-    pub fn get_context_low_condition_location_robust(&self) -> Option<LocationResult> {
-        // Find the function using stable patterns
-        let function_location = self.find_context_low_function_robust()?;
-        let function_content =
-            &self.file_content[function_location.start_index..function_location.end_index];
-
-        // Look for if condition pattern using regex - match any condition that returns null
-        let if_pattern = Regex::new(r"if\([^)]+\)return null").ok()?;
-
-        if let Some(if_match) = if_pattern.find(function_content) {
-            let absolute_start = function_location.start_index + if_match.start();
-            let absolute_end = function_location.start_index + if_match.end();
-
-            println!("Found if condition: '{}'", if_match.as_str());
-
-            Some(LocationResult {
-                start_index: absolute_start,
-                end_index: absolute_end,
-                variable_name: Some(if_match.as_str().to_string()),
-            })
-        } else {
-            println!("❌ Could not find if condition in context function");
-            None
+        // 3. ESC interrupt display
+        match self.find_esc_interrupt_condition(root) {
+            Some(loc) => {
+                let original_condition = loc.variable_name.clone().unwrap_or_default();
+                println!(
+                    "Replacing condition '{}' with '(false)' at position {}-{}",
+                    original_condition, loc.start_index, loc.end_index
+                );
+                let replacement = "(false)".to_string();
+                self.show_diff(
+                    "ESC Interrupt",
+                    &replacement,
+                    loc.start_index,
+                    loc.end_index,
+                );
+                patches.push(PatchInfo {
+                    location: loc,
+                    replacement,
+                });
+                results.push(("ESC interrupt display", true));
+            }
+            None => {
+                println!("⚠️ Could not disable esc/interrupt display");
+                results.push(("ESC interrupt display", false));
+            }
         }
-    }
 
-    /// Disable context low warnings by modifying the if condition to always return null
-    /// Uses robust pattern matching based on stable identifiers
-    pub fn disable_context_low_warnings(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(location) = self.get_context_low_condition_location_robust() {
-            let replacement_condition = "if(true)return null";
+        // 4. Chrome subscription check
+        match self.find_chrome_subscription_check(root) {
+            Some(loc) => {
+                println!(
+                    "Removing '{}' at position {}-{}",
+                    loc.variable_name.as_ref().unwrap_or(&String::new()),
+                    loc.start_index,
+                    loc.end_index
+                );
+                let replacement = "".to_string();
+                self.show_diff(
+                    "Chrome Subscription Check",
+                    &replacement,
+                    loc.start_index,
+                    loc.end_index,
+                );
+                patches.push(PatchInfo {
+                    location: loc,
+                    replacement,
+                });
+                results.push(("Chrome subscription check", true));
+            }
+            None => {
+                println!("⚠️ Could not bypass Chrome subscription check");
+                results.push(("Chrome subscription check", false));
+            }
+        }
 
+        // 5. /chrome command message
+        match self.find_chrome_command_message(root) {
+            Some(loc) => {
+                println!(
+                    "Replacing '{}' with 'false&&' at position {}-{}",
+                    loc.variable_name.as_ref().unwrap_or(&String::new()),
+                    loc.start_index,
+                    loc.end_index
+                );
+                let replacement = "false&&".to_string();
+                self.show_diff(
+                    "/chrome Command Message",
+                    &replacement,
+                    loc.start_index,
+                    loc.end_index,
+                );
+                patches.push(PatchInfo {
+                    location: loc,
+                    replacement,
+                });
+                results.push(("/chrome command message", true));
+            }
+            None => {
+                println!("⚠️ Could not remove /chrome command subscription message");
+                results.push(("/chrome command message", false));
+            }
+        }
+
+        // 6. Chrome startup notification
+        match self.find_chrome_startup_notification_check(root) {
+            Some(loc) => {
+                println!(
+                    "Replacing '{}' with 'false' at position {}-{}",
+                    loc.variable_name.as_ref().unwrap_or(&String::new()),
+                    loc.start_index,
+                    loc.end_index
+                );
+                let replacement = "false".to_string();
+                self.show_diff(
+                    "Chrome Startup Notification",
+                    &replacement,
+                    loc.start_index,
+                    loc.end_index,
+                );
+                patches.push(PatchInfo {
+                    location: loc,
+                    replacement,
+                });
+                results.push(("Chrome startup notification", true));
+            }
+            None => {
+                println!("⚠️ Could not remove Chrome startup notification check");
+                results.push(("Chrome startup notification", false));
+            }
+        }
+
+        // Sort patches by position descending (apply from end to start to avoid offset issues)
+        patches.sort_by(|a, b| b.location.start_index.cmp(&a.location.start_index));
+
+        // Apply all patches in one pass
+        for patch in patches {
             let new_content = format!(
                 "{}{}{}",
-                &self.file_content[..location.start_index],
-                replacement_condition,
-                &self.file_content[location.end_index..]
-            );
-
-            self.show_diff(
-                replacement_condition,
-                location.start_index,
-                location.end_index,
+                &self.file_content[..patch.location.start_index],
+                patch.replacement,
+                &self.file_content[patch.location.end_index..]
             );
             self.file_content = new_content;
-
-            println!("✅ Context low warnings disabled successfully");
-            Ok(())
-        } else {
-            Err("Could not locate context low condition using robust method".into())
         }
+
+        results
     }
 
-    /// Write a replacement for the context low message
-    pub fn write_context_low_message(
-        &mut self,
-        new_message: &str,
-        variable_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let location = self
-            .get_context_low_message_location()
-            .ok_or("Failed to find context low message location")?;
-
-        let new_code = format!(
-            r#""{}","{}","{}""#,
-            new_message.split(',').nth(0).unwrap_or(new_message),
-            variable_name,
-            new_message.split(',').nth(1).unwrap_or("")
-        );
-
-        let new_content = format!(
-            "{}{}{}",
-            &self.file_content[..location.start_index],
-            new_code,
-            &self.file_content[location.end_index..]
-        );
-
-        self.show_diff(&new_code, location.start_index, location.end_index);
-        self.file_content = new_content;
-
-        Ok(())
-    }
-
-    /// Find the ternary condition for esc/interrupt display
-    /// Pattern: ...CONDITION?[...{key:"esc"}...,"to interrupt"...]:[]
-    /// Returns the position of CONDITION that needs to be replaced with (false)
-    fn find_esc_interrupt_condition(&self) -> Option<LocationResult> {
-        let anchor1 = r#"{key:"esc"}"#;
-        let anchor2 = r#""to interrupt""#;
-
-        let mut search_start = 0;
-        while let Some(anchor1_offset) = self.file_content[search_start..].find(anchor1) {
-            let anchor1_pos = search_start + anchor1_offset;
-
-            let search_window_end = (anchor1_pos + 200).min(self.file_content.len());
-            let window = &self.file_content[anchor1_pos..search_window_end];
-
-            if window.contains(anchor2) {
-                println!(
-                    "Found both anchors: {{key:\"esc\"}} at {} and \"to interrupt\" nearby",
-                    anchor1_pos
-                );
-
-                let before_anchor = &self.file_content[..anchor1_pos];
-                if let Some(spread_offset) = before_anchor.rfind("...") {
-                    let spread_pos = spread_offset;
-                    println!("  Found spread operator at: {}", spread_pos);
-
-                    let between_spread_and_anchor = &self.file_content[spread_pos..anchor1_pos];
-                    if let Some(question_offset) = between_spread_and_anchor.find('?') {
-                        let question_pos = spread_pos + question_offset;
-
-                        let condition_start = spread_pos + 3;
-                        let condition_end = question_pos;
-
-                        let condition = &self.file_content[condition_start..condition_end];
-                        println!(
-                            "  Found condition '{}' at {}-{}",
-                            condition.trim(),
-                            condition_start,
-                            condition_end
-                        );
-
-                        return Some(LocationResult {
-                            start_index: condition_start,
-                            end_index: condition_end,
-                            variable_name: Some(condition.trim().to_string()),
-                        });
-                    }
-                }
+    /// Print patch results summary
+    pub fn print_summary(results: &[(&str, bool)]) {
+        println!("\n📊 Patch Results:");
+        for (name, success) in results {
+            if *success {
+                println!("  ✅ {}", name);
+            } else {
+                println!("  ❌ {}", name);
             }
-
-            search_start = anchor1_pos + 1;
         }
 
-        None
-    }
+        let success_count = results.iter().filter(|(_, s)| *s).count();
+        let total_count = results.len();
 
-    /// Disable "esc to interrupt" display by replacing ternary condition with (false)
-    /// Changes: ...H1?[esc elements]:[] → ...(false)?[esc elements]:[]
-    pub fn disable_esc_interrupt_display(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let location = self
-            .find_esc_interrupt_condition()
-            .ok_or("Could not find esc/interrupt ternary condition")?;
-
-        let original_condition = location
-            .variable_name
-            .as_ref()
-            .ok_or("No condition variable found")?;
-
-        println!(
-            "Replacing condition '{}' with '(false)' at position {}-{}",
-            original_condition, location.start_index, location.end_index
-        );
-
-        self.show_diff("(false)", location.start_index, location.end_index);
-
-        let new_content = format!(
-            "{}(false){}",
-            &self.file_content[..location.start_index],
-            &self.file_content[location.end_index..]
-        );
-
-        self.file_content = new_content;
-        println!("✅ ESC interrupt display disabled successfully");
-
-        Ok(())
+        if success_count == total_count {
+            println!("\n✅ All {} patches applied successfully!", total_count);
+        } else {
+            println!(
+                "\n⚠️ {}/{} patches applied successfully",
+                success_count, total_count
+            );
+        }
     }
 }
