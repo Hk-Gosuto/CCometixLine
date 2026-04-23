@@ -177,6 +177,9 @@ pub fn quota_segment() -> SegmentConfig {
             background: None,
         },
         styles: TextStyleConfig::default(),
-        options: HashMap::new(),
+        options: HashMap::from([
+            ("cache_duration".to_string(), serde_json::json!(300)),
+            ("timeout".to_string(), serde_json::json!(5)),
+        ]),
     }
 }

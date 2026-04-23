@@ -1,6 +1,7 @@
 use super::{Segment, SegmentData};
 use crate::config::{InputData, SegmentId};
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -17,7 +18,7 @@ struct QuotaResponse {
     _message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenUsageData {
     object: String,
     name: String,
@@ -28,6 +29,18 @@ struct TokenUsageData {
     model_limits: HashMap<String, Value>,
     model_limits_enabled: bool,
     expires_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct QuotaCache {
+    data: TokenUsageData,
+    cached_at: String,
+}
+
+enum FetchQuotaResult {
+    Success(QuotaResponse),
+    RetryableFailure,
+    FatalFailure,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,12 +177,52 @@ impl QuotaSegment {
         }
     }
 
-    fn fetch_quota_data() -> Option<QuotaResponse> {
-        use ureq;
+    fn get_cache_path() -> Option<PathBuf> {
+        let home = dirs::home_dir()?;
+        Some(
+            home.join(".claude")
+                .join("ccline")
+                .join(".quota_cache.json"),
+        )
+    }
 
-        // Get base URL from Claude settings
-        let base_url = Self::get_anthropic_base_url()?;
-        let auth_token = Self::get_anthropic_auth_token()?;
+    fn load_cache() -> Option<QuotaCache> {
+        let cache_path = Self::get_cache_path()?;
+        if !cache_path.exists() {
+            return None;
+        }
+
+        let content = fs::read_to_string(&cache_path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    fn save_cache(cache: &QuotaCache) {
+        if let Some(cache_path) = Self::get_cache_path() {
+            if let Some(parent) = cache_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(cache) {
+                let _ = fs::write(&cache_path, json);
+            }
+        }
+    }
+
+    fn is_cache_valid(cache: &QuotaCache, cache_duration: u64) -> bool {
+        if let Ok(cached_at) = DateTime::parse_from_rfc3339(&cache.cached_at) {
+            let now = Utc::now();
+            let elapsed = now.signed_duration_since(cached_at.with_timezone(&Utc));
+            elapsed.num_seconds() < cache_duration as i64
+        } else {
+            false
+        }
+    }
+
+    fn is_retryable_status(status: u16) -> bool {
+        matches!(status, 408 | 425 | 429) || status >= 500
+    }
+
+    fn fetch_quota_data(base_url: &str, auth_token: &str, timeout_secs: u64) -> FetchQuotaResult {
+        use ureq;
 
         // Construct the usage endpoint URL
         let usage_url = if base_url.ends_with('/') {
@@ -184,14 +237,22 @@ impl QuotaSegment {
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .config()
-            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
             .build()
             .call()
         {
             Ok(response) => response,
+            Err(ureq::Error::StatusCode(status)) => {
+                Self::debug_log(format!("request failed with status {}", status));
+                return if Self::is_retryable_status(status) {
+                    FetchQuotaResult::RetryableFailure
+                } else {
+                    FetchQuotaResult::FatalFailure
+                };
+            }
             Err(err) => {
                 Self::debug_log(format!("request failed: {}", err));
-                return None;
+                return FetchQuotaResult::RetryableFailure;
             }
         };
 
@@ -201,6 +262,8 @@ impl QuotaSegment {
                 Self::debug_log("failed to parse quota response body as JSON");
             }
             parsed
+                .map(FetchQuotaResult::Success)
+                .unwrap_or(FetchQuotaResult::RetryableFailure)
         } else {
             let status = response.status();
             let body = response
@@ -208,7 +271,11 @@ impl QuotaSegment {
                 .read_to_string()
                 .unwrap_or_else(|_| "<failed to read body>".to_string());
             Self::debug_log(format!("unexpected status {} body: {}", status, body));
-            None
+            if Self::is_retryable_status(status.as_u16()) {
+                FetchQuotaResult::RetryableFailure
+            } else {
+                FetchQuotaResult::FatalFailure
+            }
         }
     }
 
@@ -275,17 +342,58 @@ impl QuotaSegment {
 
 impl Segment for QuotaSegment {
     fn collect(&self, _input: &InputData) -> Option<SegmentData> {
+        let config = crate::config::Config::load().ok()?;
+        let segment_config = config.segments.iter().find(|s| s.id == SegmentId::Quota);
         let base_url = Self::get_anthropic_base_url()?;
-        let response = Self::fetch_quota_data()?;
-        if !response.code || response.data.object != "token_usage" {
-            Self::debug_log(format!(
-                "response rejected: code={} object={}",
-                response.code, response.data.object
-            ));
-            return None;
-        }
+        let auth_token = Self::get_anthropic_auth_token()?;
 
-        let quota = response.data;
+        let cache_duration = segment_config
+            .and_then(|sc| sc.options.get("cache_duration"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300);
+
+        let timeout = segment_config
+            .and_then(|sc| sc.options.get("timeout"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5);
+
+        let cached_data = Self::load_cache();
+        let use_cached = cached_data
+            .as_ref()
+            .map(|cache| Self::is_cache_valid(cache, cache_duration))
+            .unwrap_or(false);
+
+        let (quota, stale) = if use_cached {
+            (cached_data.unwrap().data, false)
+        } else {
+            match Self::fetch_quota_data(&base_url, &auth_token, timeout) {
+                FetchQuotaResult::Success(response) => {
+                    if !response.code || response.data.object != "token_usage" {
+                        Self::debug_log(format!(
+                            "response rejected: code={} object={}",
+                            response.code, response.data.object
+                        ));
+                        return None;
+                    }
+
+                    let quota = response.data;
+                    Self::save_cache(&QuotaCache {
+                        data: quota.clone(),
+                        cached_at: Utc::now().to_rfc3339(),
+                    });
+                    (quota, false)
+                }
+                FetchQuotaResult::RetryableFailure => {
+                    if let Some(cache) = cached_data {
+                        (cache.data, true)
+                    } else {
+                        return None;
+                    }
+                }
+                FetchQuotaResult::FatalFailure => return None,
+            }
+        };
+
         let primary_display = Self::format_display_name(&quota.name);
         let secondary_display = format!("· {}", Self::format_quota_display(&quota));
 
@@ -319,6 +427,7 @@ impl Segment for QuotaSegment {
             },
         );
         metadata.insert("base_url".to_string(), base_url);
+        metadata.insert("stale".to_string(), stale.to_string());
         if !quota.model_limits.is_empty() {
             let mut model_names = quota.model_limits.keys().cloned().collect::<Vec<_>>();
             model_names.sort();
