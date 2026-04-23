@@ -16,7 +16,7 @@ The statusline shows: Model | Directory | Git Branch Status | Context Window Inf
 ## Features
 
 ### Core Functionality
-- **Git integration** with branch, status, and tracking info  
+- **Git integration** with branch, status, and tracking info
 - **Model display** with simplified Claude model names
 - **Usage tracking** based on transcript analysis
 - **Directory display** showing current workspace
@@ -43,18 +43,18 @@ Install via npm (works on all platforms):
 
 ```bash
 # Install globally
-npm install -g @cometix/ccline
+npm install -g @gosuto/ccline
 
 # Or using yarn
-yarn global add @cometix/ccline
+yarn global add @gosuto/ccline
 
 # Or using pnpm
-pnpm add -g @cometix/ccline
+pnpm add -g @gosuto/ccline
 ```
 
 Use npm mirror for faster download:
 ```bash
-npm install -g @cometix/ccline --registry https://registry.npmmirror.com
+npm install -g @gosuto/ccline --registry https://registry.npmmirror.com
 ```
 
 After installation:
@@ -96,7 +96,7 @@ Add to your Claude Code `settings.json`:
 ### Update
 
 ```bash
-npm update -g @cometix/ccline
+npm update -g @gosuto/ccline
 ```
 
 <details>

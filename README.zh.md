@@ -43,18 +43,18 @@
 
 ```bash
 # 全局安装
-npm install -g @cometix/ccline
+npm install -g @gosuto/ccline
 
 # 或使用 yarn
-yarn global add @cometix/ccline
+yarn global add @gosuto/ccline
 
 # 或使用 pnpm
-pnpm add -g @cometix/ccline
+pnpm add -g @gosuto/ccline
 ```
 
 使用镜像源加速下载：
 ```bash
-npm install -g @cometix/ccline --registry https://registry.npmmirror.com
+npm install -g @gosuto/ccline --registry https://registry.npmmirror.com
 ```
 
 安装后：
@@ -96,7 +96,7 @@ npm install -g @cometix/ccline --registry https://registry.npmmirror.com
 ### 更新
 
 ```bash
-npm update -g @cometix/ccline
+npm update -g @gosuto/ccline
 ```
 
 <details>

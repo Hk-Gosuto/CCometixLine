@@ -153,9 +153,9 @@ impl UpdateState {
 
 /// npm registry version check
 mod registry {
-    /// Check @cometix/ccline latest version from npm registry
+    /// Check @gosuto/ccline latest version from npm registry
     pub fn check_for_updates() -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let url = "https://registry.npmjs.org/@cometix/ccline/latest";
+        let url = "https://registry.npmjs.org/@gosuto/ccline/latest";
 
         let response = ureq::get(url).header("Accept", "application/json").call()?;
 

@@ -168,8 +168,8 @@ pub fn quota_segment() -> SegmentConfig {
         id: SegmentId::Quota,
         enabled: true,
         icon: IconConfig {
-            plain: "📊".to_string(),
-            nerd_font: "\u{f0e4e}".to_string(),
+            plain: "👤".to_string(),
+            nerd_font: "\u{f007}".to_string(),
         },
         colors: ColorConfig {
             icon: Some(AnsiColor::Color16 { c16: 9 }), // Red

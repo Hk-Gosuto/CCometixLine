@@ -184,14 +184,17 @@ impl PreviewComponent {
                     },
                 },
                 SegmentId::Quota => SegmentData {
-                    primary: "Premium: 298 (99%)".to_string(),
-                    secondary: "".to_string(),
+                    primary: "xxx".to_string(),
+                    secondary: "· 24.6M (98.6%)".to_string(),
                     metadata: {
                         let mut map = HashMap::new();
-                        map.insert("premium_remaining".to_string(), "298".to_string());
-                        map.insert("premium_percent".to_string(), "99.33".to_string());
-                        map.insert("premium_unlimited".to_string(), "false".to_string());
-                        map.insert("plan".to_string(), "business".to_string());
+                        map.insert("name".to_string(), "xxx".to_string());
+                        map.insert("total_granted".to_string(), "25000000".to_string());
+                        map.insert("total_used".to_string(), "358682".to_string());
+                        map.insert("total_available".to_string(), "24641318".to_string());
+                        map.insert("unlimited_quota".to_string(), "false".to_string());
+                        map.insert("model_limits_enabled".to_string(), "false".to_string());
+                        map.insert("expires_at".to_string(), "0".to_string());
                         map
                     },
                 },

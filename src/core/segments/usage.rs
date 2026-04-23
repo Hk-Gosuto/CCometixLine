@@ -126,10 +126,16 @@ impl UsageSegment {
     }
 
     fn get_proxy_from_settings() -> Option<String> {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()?;
-        let settings_path = format!("{}/.claude/settings.json", home);
+        let settings_path = if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+            std::path::PathBuf::from(config_dir).join("settings.json")
+        } else {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok()?;
+            std::path::PathBuf::from(home)
+                .join(".claude")
+                .join("settings.json")
+        };
 
         let content = std::fs::read_to_string(&settings_path).ok()?;
         let settings: serde_json::Value = serde_json::from_str(&content).ok()?;
