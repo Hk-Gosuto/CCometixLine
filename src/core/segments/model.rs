@@ -108,10 +108,16 @@ impl ModelSegment {
         if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
             let path = PathBuf::from(config_dir).join("settings.json");
             if path.exists() {
-                Self::debug_log(format!("using CLAUDE_CONFIG_DIR settings: {}", path.display()));
+                Self::debug_log(format!(
+                    "using CLAUDE_CONFIG_DIR settings: {}",
+                    path.display()
+                ));
                 return Some(path);
             }
-            Self::debug_log(format!("CLAUDE_CONFIG_DIR set but settings.json not found: {}", path.display()));
+            Self::debug_log(format!(
+                "CLAUDE_CONFIG_DIR set but settings.json not found: {}",
+                path.display()
+            ));
         }
         if let Some(home_dir) = dirs::home_dir() {
             let path = home_dir.join(".claude").join("settings.json");
@@ -119,7 +125,10 @@ impl ModelSegment {
                 Self::debug_log(format!("using default settings: {}", path.display()));
                 return Some(path);
             }
-            Self::debug_log(format!("default settings.json not found: {}", path.display()));
+            Self::debug_log(format!(
+                "default settings.json not found: {}",
+                path.display()
+            ));
         }
         Self::debug_log("no settings.json found");
         None
@@ -130,7 +139,10 @@ impl ModelSegment {
         let content = fs::read_to_string(&settings_path).ok()?;
         let settings = serde_json::from_str(&content).ok();
         if settings.is_none() {
-            Self::debug_log(format!("failed to parse settings.json: {}", settings_path.display()));
+            Self::debug_log(format!(
+                "failed to parse settings.json: {}",
+                settings_path.display()
+            ));
         }
         settings
     }
@@ -151,7 +163,10 @@ impl ModelSegment {
             Self::debug_log("ANTHROPIC_BASE_URL in settings is empty");
             None
         } else {
-            Self::debug_log(format!("using ANTHROPIC_BASE_URL from settings: {}", trimmed));
+            Self::debug_log(format!(
+                "using ANTHROPIC_BASE_URL from settings: {}",
+                trimmed
+            ));
             Some(trimmed.to_string())
         }
     }
@@ -172,7 +187,10 @@ impl ModelSegment {
             .ok()?;
 
         if resp.status() != 200 {
-            Self::debug_log(format!("pricing fetch failed with status: {}", resp.status()));
+            Self::debug_log(format!(
+                "pricing fetch failed with status: {}",
+                resp.status()
+            ));
             return None;
         }
 
@@ -231,9 +249,14 @@ impl ModelSegment {
             }
         };
 
-        Self::debug_log(format!("looking up model_id='{}' in {} entries", model_id, list.len()));
+        Self::debug_log(format!(
+            "looking up model_id='{}' in {} entries",
+            model_id,
+            list.len()
+        ));
         // Exact match first, then prefix match in both directions
-        let found = list.iter()
+        let found = list
+            .iter()
             .find(|m| m.model_name == model_id)
             .or_else(|| list.iter().find(|m| model_id.starts_with(&m.model_name)))
             .or_else(|| list.iter().find(|m| m.model_name.starts_with(model_id)))
@@ -242,7 +265,10 @@ impl ModelSegment {
             Self::debug_log(format!(
                 "no match for '{}', available: {}",
                 model_id,
-                list.iter().map(|m| m.model_name.as_str()).collect::<Vec<_>>().join(", ")
+                list.iter()
+                    .map(|m| m.model_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         found
@@ -286,14 +312,18 @@ impl Segment for ModelSegment {
         metadata.insert("model_id".to_string(), input.model.id.clone());
         metadata.insert("display_name".to_string(), input.model.display_name.clone());
 
-        let secondary = if let Some(pricing) = Self::get_pricing(&input.model.id, cache_duration, timeout) {
-            metadata.insert("model_ratio".to_string(), pricing.model_ratio.to_string());
-            metadata.insert("completion_ratio".to_string(), pricing.completion_ratio.to_string());
-            let out_ratio = pricing.model_ratio * pricing.completion_ratio;
-            format_ratio_display(pricing.model_ratio, out_ratio)
-        } else {
-            String::new()
-        };
+        let secondary =
+            if let Some(pricing) = Self::get_pricing(&input.model.id, cache_duration, timeout) {
+                metadata.insert("model_ratio".to_string(), pricing.model_ratio.to_string());
+                metadata.insert(
+                    "completion_ratio".to_string(),
+                    pricing.completion_ratio.to_string(),
+                );
+                let out_ratio = pricing.model_ratio * pricing.completion_ratio;
+                format_ratio_display(pricing.model_ratio, out_ratio)
+            } else {
+                String::new()
+            };
 
         Some(SegmentData {
             primary: self.format_model_name(&input.model.id, &input.model.display_name),
